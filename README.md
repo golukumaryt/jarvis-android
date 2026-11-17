@@ -186,6 +186,13 @@ build-environment helper only — the app itself does not need it.)
   battery, opening any app (pyjnius; degrades gracefully off-Android).
 - `buildozer.spec` — Android build settings (API 33, arm64). v2.0:
   requirements `python3,kivy,plyer,android,pyjnius` — no requests.
+  Points at `p4a.local_recipes = ./p4a-recipes`.
+- `p4a-recipes/kivy/` — local python-for-android recipe override: a copy
+  of the stock Kivy recipe with `requests` removed from python_depends
+  (plus its 3 stock patch files). This is what stops the build from
+  pip-installing requests — and the charset-normalizer wheel that broke
+  every cloud build. Without it, the build fails even though the app
+  never imports requests.
 - `backup-v1.1/` — the v1.1 source files, kept for reference.
 - `proxy-relay.py` — build helper: local unauthenticated proxy relay for
   machines behind an authenticated egress proxy (see above). Not part of the
