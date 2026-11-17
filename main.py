@@ -1,7 +1,15 @@
-# J.A.R.V.I.S. — Android voice assistant (Kivy)
-# -----------------------------------------------
+# J.A.R.V.I.S. — Android voice assistant (Kivy) — v2.0, rewritten 2026-11-17
+# ---------------------------------------------------------------------------
 # Talk by voice, it talks back, answers questions with the Google Gemini
 # API and runs tasks on the phone.
+#
+# v2.0 rewrite: the v1.x build kept failing in the cloud because the
+# `requests` library pulls in charset-normalizer, whose newest release
+# ships a compiled wheel the Android toolchain rejects. This version
+# drops `requests` entirely — ALL network calls use Python's built-in
+# urllib (standard library, nothing to install), so the build only needs
+# python3, kivy, plyer, android and pyjnius. Same features, same voice,
+# same commands — only the networking changed.
 #
 # Brain: Google Gemini (gemini-2.0-flash, fallback gemini-1.5-flash).
 # The API key is entered once inside the app and stored only on the phone
@@ -15,14 +23,17 @@
 #            actor's real voice from the films.
 
 import json
+import math
 import os
+import random
 import re
+import ssl
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 from datetime import datetime
-
-import requests
 
 from kivy.app import App
 from kivy.clock import Clock
@@ -63,11 +74,13 @@ except Exception:
 # ---------------------------------------------------------------- constants
 
 APP_TITLE = "J.A.R.V.I.S."
+APP_VERSION = "2.0"
 BG_COLOR = (0.016, 0.027, 0.05, 1)
 CYAN = (0.21, 0.88, 1.0, 1)
 CYAN_DIM = (0.13, 0.55, 0.68, 1)
 TEXT_COLOR = (0.88, 0.93, 0.96, 1)
 MUTED_COLOR = (0.62, 0.70, 0.78, 1)
+USER_AGENT = "JARVIS-Android/2.0"
 
 SYSTEM_PROMPT = (
     "You are J.A.R.V.I.S., a calm, precise, courteous British AI assistant in the "
@@ -100,7 +113,7 @@ COMMANDS_TEXT = (
 )
 
 
-# ---------------------------------------------------------------- helpers
+# ---------------------------------------------------------------- storage
 
 def data_dir():
     """Private app storage directory (works on Android and on desktop)."""
@@ -142,45 +155,76 @@ def save_config(cfg):
         return False
 
 
+# ---------------------------------------------------------------- networking (stdlib only — no requests)
+
+def _http_post_json(url, payload, timeout=30):
+    """POST a JSON body, return (status_code, parsed_json_or_None).
+
+    Raises urllib.error.URLError on network failure.
+    """
+    body = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=body, method="POST",
+        headers={"Content-Type": "application/json",
+                 "User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status, json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            data = json.loads(e.read().decode("utf-8"))
+        except Exception:
+            data = None
+        return e.code, data
+
+
+def _http_get_text(url, timeout=10):
+    """GET a URL, return the response text, or None on any failure."""
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            if resp.status == 200:
+                return resp.read().decode("utf-8").strip()
+    except Exception:
+        pass
+    return None
+
+
 def ask_gemini(question, api_key):
     """Ask Gemini. Returns (reply_text, error_code or None).
 
-    error_code is 'key' (bad/missing key), 'net' (network/API failure).
+    error_code is 'key' (bad/missing key) or 'net' (network/API failure).
     """
     prompt = SYSTEM_PROMPT + "\n\nUser: " + question + "\nJ.A.R.V.I.S.:"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 350},
+    }
     for model in GEMINI_MODELS:
         try:
             url = (
                 "https://generativelanguage.googleapis.com/v1beta/models/"
                 + model + ":generateContent?key=" + api_key
             )
-            resp = requests.post(
-                url,
-                json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "temperature": 0.7,
-                        "maxOutputTokens": 350,
-                    },
-                },
-                timeout=30,
-            )
-            if resp.status_code == 200:
-                data = resp.json()
+            status, data = _http_post_json(url, payload, timeout=30)
+        except Exception:
+            continue  # network error — try the next model, then report 'net'
+        if status == 200 and data:
+            try:
                 parts = data["candidates"][0]["content"]["parts"]
                 text = "".join(p.get("text", "") for p in parts).strip()
-                if text:
-                    return text, None
-                return None, "net"
-            if resp.status_code == 404:
-                continue  # model unavailable -> try the next model
-            if resp.status_code in (400, 401, 403):
-                # Our request body is fixed and valid, so a 4xx here means
-                # the API key is missing, wrong or expired.
-                return None, "key"
-            # 429 / 5xx: transient — try the next model, then report 'net'.
-        except Exception:
-            continue
+            except Exception:
+                text = ""
+            if text:
+                return text, None
+            return None, "net"
+        if status == 404:
+            continue  # model unavailable — try the next model
+        if status in (400, 401, 403):
+            # Our request body is fixed and valid, so a 4xx here means
+            # the API key is missing, wrong or expired.
+            return None, "key"
+        # 429 / 5xx: transient — try the next model, then report 'net'.
     return None, "net"
 
 
@@ -205,12 +249,9 @@ def open_url(url):
 
 def get_weather():
     """Short current-weather line from wttr.in, or None on failure."""
-    try:
-        r = requests.get("https://wttr.in/?format=%C+%t", timeout=10)
-        if r.status_code == 200 and r.text.strip():
-            return "Current weather: " + r.text.strip() + "."
-    except Exception:
-        pass
+    text = _http_get_text("https://wttr.in/?format=%C+%t", timeout=10)
+    if text:
+        return "Current weather: " + text + "."
     return None
 
 
@@ -253,7 +294,6 @@ class Reactor(Widget):
         a = self.arc_angle
         self.arc1.circle = (cx, cy, r * 0.92, a, a + 70)
         self.arc2.circle = (cx, cy, r * 0.92, a + 180, a + 235)
-        import math
         glow = 1 + 0.10 * math.sin(self.pulse * 2.2) + 0.35 * self.energy
         cr = r * 0.42 * glow
         cr = min(cr, r * 0.62)
@@ -277,8 +317,6 @@ class Waveform(Widget):
         Clock.schedule_interval(self._tick, 0.09)
 
     def _tick(self, dt):
-        import math
-        import random
         self._phase += dt
         for i in range(self.bars):
             wave = 0.5 + 0.5 * math.sin(self._phase * 6 + i * 0.7)
@@ -624,6 +662,7 @@ class JarvisApp(App):
                 return "What shall I search for, sir?"
             open_url("https://www.google.com/search?q=" + q.replace(" ", "+"))
             return "Searching the web for " + q + ", sir."
+
         if t.startswith("note ") or t.startswith("take a note"):
             note = re.sub(r"^(note|take a note)\s*", "", t, count=1).strip()
             if not note:
@@ -647,10 +686,8 @@ class JarvisApp(App):
             amount = int(m.group(1))
             unit = m.group(2)
             secs = amount * 60 if "minute" in unit else amount
-            if "minute" in unit:
-                unit_word = "minute" if amount == 1 else "minutes"
-            else:
-                unit_word = "second" if amount == 1 else "seconds"
+            unit_word = ("minute" if amount == 1 else "minutes") if "minute" in unit \
+                else ("second" if amount == 1 else "seconds")
             label = "%d %s" % (amount, unit_word)
             info = {"label": label, "fires_at": time.time() + secs}
 
@@ -723,7 +760,7 @@ class JarvisApp(App):
                     return android_phone.set_flashlight(False)
                 if "on" in t:
                     return android_phone.set_flashlight(True)
-                return ("Flashlight on or off, sir?")
+                return "Flashlight on or off, sir?"
 
             if "battery" in t or "system status" in t:
                 return android_phone.battery_status()

@@ -3,64 +3,30 @@
 A voice assistant for your Android phone, Iron-Man style: talk to it, it talks
 back, answers questions with real AI, and runs tasks on your phone.
 
-## ⚠️ Build status — no APK in this folder yet
+## ⚠️ Build status — v2.0 rewritten, building in the cloud
 
-The complete, tested app source is here, but **no APK was produced on this
-machine**. The build got all the way through downloading the Android SDK,
-command-line tools and NDK (~2.3 GB), then stopped at the `sdkmanager`
-step — and the reason is the machine itself, not the app:
+**v2.0 (Tue 2026-11-17): the app was rewritten from scratch.** The v1.1
+cloud builds (GitHub Actions, repo `golukumaryt/jarvis-android`) failed
+4 times: twice on the Android SDK license prompt (fixed), then twice at
+the build step itself — `requests` pulls in charset-normalizer, whose
+newest release ships a compiled wheel the Android toolchain rejects
+("is not a supported wheel on this platform"). v2.0 drops `requests`
+entirely and uses only Python's built-in urllib for networking, so the
+build requirements are just `python3,kivy,plyer,android,pyjnius`.
+Same features, same voice, same commands — only the networking changed.
+The rewritten files are being built in the cloud now; the APK will be
+sent to the user when a run succeeds. v1.1 source is kept in
+`backup-v1.1/` in this folder and in the repo's git history.
 
-### Retry Tue 2026-11-17 ~10:10 IST — still blocked
-
-The user enabled the `other_tcp` permission in Muse settings and the build
-was retried. **It still fails at the same place, and the build was not
-started** — a Java test program was run first, as a gate check, and it
-proved Java TCP is still blocked: opening a socket to `dl.google.com:443`
-or to the egress proxy gets the sandbox's 193-byte denial back instead of a
-real connection ("Other TCP connections is turned off for this assistant...
-switch other_tcp from Deny to Ask"). Verified three times, including a
-re-test 90 seconds later, so this is not a propagation delay. A build that
-cannot open TCP cannot succeed, so no build time was spent.
-
-What would unblock it: check the setting really saved (Muse Settings →
-Permissions → Direct network protocols → `other_tcp` on **Ask** or
-**Allow**), and if it is on, try **Allow** instead of Ask, or retry in a
-fresh session — the change may not apply to a session that was already
-running. Until a Java test program can open a real TCP connection, no APK
-can be built on this machine; building on your own PC (below) still works.
-
-Side note from the retry: the system JDK that the first attempt used is
-gone (system paths do not survive a VM restart), so a fresh Temurin JDK 17
-was downloaded and now lives at `~/jdk-17.0.21+9` (tarball `~/jdk17.tar.gz`)
-— the next retry can use it via `JAVA_HOME=~/jdk-17.0.21+9`.
-
-
-- This machine only reaches the internet through an authenticated egress
-  proxy. Python and curl use it fine.
-- But the Android build tools (`sdkmanager`, Gradle) are **Java** programs,
-  and on this machine **Java processes cannot open TCP connections at all** —
-  the sandbox intercepts them and answers with a "direct TCP connections are
-  turned off" message. Proven directly: a Java test program connecting to the
-  proxy, to a local test server, and to a local relay all got the sandbox's
-  denial text instead of a real connection, while the same connections from
-  Python and curl worked.
-- So `sdkmanager` fails with `java.util.NoSuchElementException` while
-  fetching the package list, and no APK can be built here until that changes.
-
-**Two ways to get the APK:**
-
-1. **Build it on your own PC** (easiest — see "Build the APK yourself"
-   below). Any Linux PC, Mac, or Windows PC with WSL works; it just needs
-   normal internet, no proxy tricks.
-2. **Or build it on this machine after the sandbox permission is changed:**
-   in Muse, go to **Settings → Permissions → Direct network protocols** and
-   switch **other_tcp** from **Deny** to **Ask** (or Allow). Then re-run
-   `buildozer android debug` in this folder — the SDK/NDK are already
-   downloaded, so it should continue from the `sdkmanager` step.
+**No APK was produced on this machine.** The local build is blocked by
+the machine itself, not the app: Java processes cannot open TCP
+connections here (sandbox `other_tcp` permission off), so `sdkmanager`
+and Gradle cannot download anything. The SDK/NDK (~2.3 GB) are already
+downloaded at `~/.buildozer` for a retry if the permission is ever fixed.
 
 ## Install the APK (once you have it)
 
-1. Copy `jarvis-1.1-arm64-v8a-debug.apk` (in the `bin/` folder after a
+1. Copy `jarvis-2.0-arm64-v8a-debug.apk` (in the `bin/` folder after a
    successful build) to your phone.
 2. On the phone, open the file and tap **Install**. If Android blocks it, allow
    **Install unknown apps** for the app you opened it from (Files / Chrome),
@@ -177,7 +143,7 @@ python3 -m venv ~/.venvs/jarvis-android
 # Build (first run downloads the Android SDK + NDK, ~10 GB, and takes a while)
 cd jarvis-android
 ~/.venvs/jarvis-android/bin/buildozer android debug
-# APK: bin/jarvis-1.1-arm64-v8a-debug.apk
+# APK: bin/jarvis-2.0-arm64-v8a-debug.apk
 ```
 
 For a release APK you can install without the debug warning, use
@@ -214,10 +180,13 @@ build-environment helper only — the app itself does not need it.)
 ## Files
 
 - `main.py` — the whole app (Kivy UI, voice, commands, Gemini brain).
+  v2.0: rewritten 2026-11-17, networking on stdlib urllib only.
 - `android_tts.py` — British-voice speech output via Android's own TTS.
 - `android_phone.py` — phone powers: calls, texts, alarms, flashlight,
   battery, opening any app (pyjnius; degrades gracefully off-Android).
-- `buildozer.spec` — Android build settings (API 33, arm64).
+- `buildozer.spec` — Android build settings (API 33, arm64). v2.0:
+  requirements `python3,kivy,plyer,android,pyjnius` — no requests.
+- `backup-v1.1/` — the v1.1 source files, kept for reference.
 - `proxy-relay.py` — build helper: local unauthenticated proxy relay for
   machines behind an authenticated egress proxy (see above). Not part of the
   app.
