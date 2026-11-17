@@ -43,9 +43,66 @@ def available():
     return _HAVE_JNIUS
 
 
+def activity():
+    """The running PythonActivity, or None off-Android."""
+    if not _HAVE_JNIUS:
+        return None
+    try:
+        return _activity()
+    except Exception:
+        return None
+
+
 def _activity():
     PythonActivity = autoclass("org.kivy.android.PythonActivity")
     return PythonActivity.mActivity
+
+
+def _perm(name):
+    """A permission as the constant p4a expects, or the raw string.
+
+    p4a's Permission class does not define every newer permission
+    (e.g. POST_NOTIFICATIONS); request/check_permissions also accept
+    the raw "android.permission.*" string, so fall back to that.
+    """
+    if _HAVE_PERMS:
+        try:
+            return getattr(Permission, name)
+        except Exception:
+            pass
+    return "android.permission." + name
+
+
+def has_permission(perm_name):
+    """Public: True if the runtime permission is already granted."""
+    return _has_permission(perm_name)
+
+
+def request_permission(perm_name):
+    """Public: fire the runtime permission prompt (async)."""
+    _ask_permission(perm_name)
+
+
+def request_all_permissions():
+    """Ask for every runtime permission Jarvis needs, in one go.
+
+    Android only prompts for the ones not already granted. Call this
+    once at startup — v2.0 never asked at all, which is why the
+    microphone (and other powers) silently did nothing.
+    """
+    if not _HAVE_PERMS:
+        return
+    try:
+        request_permissions([
+            _perm("RECORD_AUDIO"),
+            _perm("READ_CONTACTS"),
+            _perm("CALL_PHONE"),
+            _perm("SEND_SMS"),
+            _perm("CAMERA"),
+            _perm("POST_NOTIFICATIONS"),
+        ])
+    except Exception:
+        pass
 
 
 def _has_permission(perm_name):
@@ -53,7 +110,7 @@ def _has_permission(perm_name):
     if not _HAVE_PERMS:
         return True  # cannot check — try anyway, Android will refuse if denied
     try:
-        return bool(check_permission(getattr(Permission, perm_name)))
+        return bool(check_permission(_perm(perm_name)))
     except Exception:
         return True
 
@@ -63,7 +120,7 @@ def _ask_permission(perm_name):
     caller should tell the user to allow it and ask again."""
     if _HAVE_PERMS:
         try:
-            request_permissions([getattr(Permission, perm_name)])
+            request_permissions([_perm(perm_name)])
         except Exception:
             pass
     return False
@@ -340,3 +397,64 @@ def open_app(name):
         return "Opening %s, sir." % label
     except Exception as exc:
         return _permission_or_error(exc, "open that app")
+
+
+# ---------------------------------------------------------------- files dir
+# (shared with the always-on listener service, which runs in the same
+# app UID — the service and the app talk through small flag files here)
+
+def app_files_dir():
+    """Absolute path of the app-private files directory, or None."""
+    if not _HAVE_JNIUS:
+        return None
+    try:
+        activity = _activity()
+        return str(activity.getFilesDir().getAbsolutePath())
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------- lock screen
+
+def show_over_lock_screen():
+    """Let the Jarvis activity appear above the lock screen and turn
+    the screen on (API 27+). Needed so a "Jarvis" wake on the lock
+    screen actually shows Jarvis instead of staying hidden behind it.
+    Safe to call repeatedly; no-ops off-Android."""
+    if not _HAVE_JNIUS:
+        return
+    try:
+        activity = _activity()
+        activity.setShowWhenLocked(True)
+        activity.setTurnScreenOn(True)
+    except Exception:
+        pass
+
+
+def unlock_phone():
+    """Bring up the phone's own unlock screen (face / fingerprint /
+    PIN) so the user can open the phone.
+
+    HONEST LIMIT: no app can unlock a phone by itself — Android only
+    lets the USER unlock it. This asks the system to show the unlock
+    prompt; the user scans their face (or enters their PIN) and the
+    phone opens. If the phone has no lock set, it opens at once.
+    """
+    if not _HAVE_JNIUS:
+        return _NOT_ANDROID
+    try:
+        Context = autoclass("android.content.Context")
+        KeyguardManager = autoclass("android.app.KeyguardManager")
+        activity = _activity()
+        show_over_lock_screen()
+        km = activity.getSystemService(Context.KEYGUARD_SERVICE)
+        if not km.isKeyguardLocked():
+            return "Your phone is already unlocked, sir."
+        # requestDismissKeyguard shows the system unlock prompt (face /
+        # fingerprint / PIN). Callback is None — we do not need the
+        # result; the system handles the unlock itself.
+        km.requestDismissKeyguard(activity, None)
+        return ("Opening the unlock screen, sir — please scan your face "
+                "or enter your PIN and the phone will open.")
+    except Exception as exc:
+        return _permission_or_error(exc, "open the unlock screen")

@@ -1,7 +1,23 @@
-# J.A.R.V.I.S. — Android voice assistant (Kivy) — v2.0, rewritten 2026-11-17
+# J.A.R.V.I.S. — Android voice assistant (Kivy) — v2.1, 2026-11-18
 # ---------------------------------------------------------------------------
 # Talk by voice, it talks back, answers questions with the Google Gemini
 # API and runs tasks on the phone.
+#
+# v2.1 fixes three user-reported problems:
+#   1. GIRL VOICE — android_tts now scores every UK voice (male names,
+#      "male" token, Google gbb/gbd male variants) and drops the pitch
+#      to 0.8 when no male voice can be found.
+#   2. MICROPHONE DEAD — v2.0 never requested the RECORD_AUDIO runtime
+#      permission (declared in the manifest only), so the mic silently
+#      did nothing. The app now requests all runtime permissions at
+#      startup and before listening. Voice input now uses android_stt
+#      (SpeechRecognizer via pyjnius) with real error reporting,
+#      falling back to plyer STT only if it is unavailable.
+#   3. ALWAYS-ON "JARVIS" — a foreground service (service/main.py)
+#      listens continuously for "Jarvis", even with the app closed or
+#      the phone locked, and wakes the app with a full-screen-intent
+#      notification. "Open phone" shows the system's face/PIN unlock
+#      screen (no app can unlock the phone by itself).
 #
 # v2.0 rewrite: the v1.x build kept failing in the cloud because the
 # `requests` library pulls in charset-normalizer, whose newest release
@@ -15,12 +31,13 @@
 # The API key is entered once inside the app and stored only on the phone
 # (app private storage). No key is ever baked into this source.
 #
-# Voice in:  plyer STT (Android speech recognition).
-# Voice out: custom Android TTS via pyjnius (Locale.UK, best-effort male
-#            voice) so Jarvis sounds British and calm, movie-style.
-#            Falls back to plyer TTS on any other platform.
-#            NOTE: the voice is a system text-to-speech voice, NOT the
-#            actor's real voice from the films.
+# Voice in:  android_stt (SpeechRecognizer via pyjnius), plyer STT fallback.
+# Voice out: custom Android TTS via pyjnius (Locale.UK, male voice
+#            picked by scoring; pitch 0.8 fallback) so Jarvis sounds
+#            British and calm, movie-style. Falls back to plyer TTS on
+#            any other platform. NOTE: the voice is a system
+#            text-to-speech voice, NOT the actor's real voice from the
+#            films.
 
 import json
 import math
@@ -65,6 +82,13 @@ except Exception:
     android_tts = None
 
 try:
+    import android_stt
+    HAVE_ANDROID_STT = android_stt.available()
+except Exception:
+    HAVE_ANDROID_STT = False
+    android_stt = None
+
+try:
     import android_phone
     HAVE_ANDROID_PHONE = android_phone.available()
 except Exception:
@@ -74,13 +98,13 @@ except Exception:
 # ---------------------------------------------------------------- constants
 
 APP_TITLE = "J.A.R.V.I.S."
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 BG_COLOR = (0.016, 0.027, 0.05, 1)
 CYAN = (0.21, 0.88, 1.0, 1)
 CYAN_DIM = (0.13, 0.55, 0.68, 1)
 TEXT_COLOR = (0.88, 0.93, 0.96, 1)
 MUTED_COLOR = (0.62, 0.70, 0.78, 1)
-USER_AGENT = "JARVIS-Android/2.0"
+USER_AGENT = "JARVIS-Android/2.1"
 
 SYSTEM_PROMPT = (
     "You are J.A.R.V.I.S., a calm, precise, courteous British AI assistant in the "
@@ -107,8 +131,12 @@ COMMANDS_TEXT = (
     "• 'Flashlight on' / 'Flashlight off'\n"
     "• 'Battery' — battery level and charging state\n"
     "• 'Open WhatsApp' — open any installed app by name\n"
+    "• 'Open phone' — shows the face / PIN unlock screen\n"
     "• 'Good morning' — briefing: time, weather, today's notes, timers\n"
     "• Anything else — I answer with my AI brain\n\n"
+    "Always-on: just say 'Jarvis' any time — even with the app closed\n"
+    "or the phone locked — and I wake up and listen. (Uses more\n"
+    "battery; turn it off with the Listener button below.)\n\n"
     "Tip: tap the microphone and speak, or type below."
 )
 
@@ -381,6 +409,10 @@ class JarvisApp(App):
     listening = False
     _stt_timer = None
     _stt_elapsed = 0
+    _stt = None
+    _stt_timeout_ev = None
+    _wake_pause_path = None
+    listener_btn = None
     _timers = []
     _timer_info = []
 
@@ -390,8 +422,27 @@ class JarvisApp(App):
         self.api_key = self.config.get("gemini_key", "")
         self.listening = False
         self._stt_timer = None
+        self._stt = None
+        self._stt_timeout_ev = None
+        self._wake_pause_path = None
         self._timers = []
         self._timer_info = []
+
+        # v2.1: ask for every runtime permission up front. v2.0 never
+        # asked at all — the microphone (and other powers) were declared
+        # in the manifest but never granted, so they silently did
+        # nothing. Android only prompts for the ones not yet granted.
+        if android_phone is not None:
+            try:
+                android_phone.request_all_permissions()
+            except Exception:
+                pass
+            # Let Jarvis appear above the lock screen when woken by
+            # the always-on listener.
+            try:
+                android_phone.show_over_lock_screen()
+            except Exception:
+                pass
 
         root = BoxLayout(orientation="vertical", spacing=6, padding=10)
 
@@ -445,6 +496,14 @@ class JarvisApp(App):
             b = Button(text=label, background_color=(0.15, 0.2, 0.3, 1))
             b.bind(on_release=fn)
             bottom.add_widget(b)
+        # Always-on listener toggle (v2.1): the foreground service
+        # that wakes on "Jarvis". Default ON.
+        self.listener_btn = Button(
+            text=("Listener: ON" if self.config.get("listener_on", True)
+                  else "Listener: OFF"),
+            background_color=(0.15, 0.2, 0.3, 1))
+        self.listener_btn.bind(on_release=self.toggle_listener)
+        bottom.add_widget(self.listener_btn)
         root.add_widget(bottom)
 
         self.add_message("JARVIS",
@@ -452,6 +511,10 @@ class JarvisApp(App):
                          "Tap the microphone and speak, or type below.")
         if not self.api_key:
             Clock.schedule_once(lambda dt: self.show_settings(first_run=True), 1.0)
+        # v2.1: watch for wake-ups from the always-on listener service.
+        Clock.schedule_interval(self._check_wake_flag, 1.0)
+        if self.config.get("listener_on", True):
+            self._start_listener_service()
         return root
 
     # ------------------------------------------------------------ chat UI
@@ -510,25 +573,139 @@ class JarvisApp(App):
         if self.listening:
             self.stop_listening()
             return
+        # v2.1: the runtime permission must be granted before the
+        # recognizer can open the mic — v2.0 never asked, so tapping
+        # the microphone silently did nothing.
+        if android_phone is not None:
+            try:
+                if not android_phone.has_permission("RECORD_AUDIO"):
+                    android_phone.request_permission("RECORD_AUDIO")
+                    self.speak("I've asked for the microphone permission, "
+                               "sir — please allow it, then tap the "
+                               "microphone again.")
+                    return
+            except Exception:
+                pass
+        self._start_listening()
+
+    def _start_listening(self):
+        """Begin one voice input. Prefers android_stt (SpeechRecognizer
+        with real error reporting); falls back to plyer STT."""
+        # Pause the always-on service while the app has the mic, or
+        # the two recognizers fight over it.
+        self._pause_listener_service()
+        self.listening = True
+        self._stt_elapsed = 0
+        self.set_status("Listening… speak now, sir.")
+        self.reactor.energy = 0.85
+        self.wave.level = 0.8
+        if self._try_android_stt():
+            return
+        self._try_plyer_stt()
+
+    def _try_android_stt(self):
+        """Start listening via android_stt. Returns True if listening
+        started (result/error arrive through the callbacks)."""
+        if not HAVE_ANDROID_STT or android_stt is None:
+            return False
+        activity = None
+        try:
+            activity = android_phone.activity() if android_phone else None
+        except Exception:
+            activity = None
+        if activity is None:
+            return False
+        try:
+            if not android_stt.recognition_available(activity):
+                return False
+        except Exception:
+            return False
+        if self._stt is None:
+            try:
+                self._stt = android_stt.SpeechInput(activity)
+            except Exception:
+                return False
+        self._stt_timeout_ev = Clock.schedule_once(self._on_stt_timeout, 12)
+        try:
+            started = self._stt.start(self._on_stt_result,
+                                      self._on_stt_error)
+        except Exception:
+            started = False
+        if not started:
+            if self._stt_timeout_ev is not None:
+                try:
+                    self._stt_timeout_ev.cancel()
+                except Exception:
+                    pass
+                self._stt_timeout_ev = None
+            return False
+        return True
+
+    def _cancel_stt_timeout(self):
+        if self._stt_timeout_ev is not None:
+            try:
+                self._stt_timeout_ev.cancel()
+            except Exception:
+                pass
+            self._stt_timeout_ev = None
+
+    def _on_stt_result(self, text):
+        self._cancel_stt_timeout()
+        heard = (text or "").strip()
+        self.stop_listening()
+        if heard:
+            self.handle_text(heard, spoken=True)
+        else:
+            self.speak("I did not catch that, sir. Could you repeat it?")
+
+    def _on_stt_error(self, code, name):
+        self._cancel_stt_timeout()
+        self.stop_listening()
+        if code == 9:
+            self.speak("I don't have the microphone permission, sir — "
+                       "please allow it in the phone's Settings, under "
+                       "Apps, J.A.R.V.I.S., Permissions, then try again.")
+        elif code in (6, 7):
+            self.speak("I could not hear you clearly, sir. "
+                       "Please try again.")
+        elif code == 8:
+            self.speak("The microphone is busy, sir — please try again "
+                       "in a moment.")
+        else:
+            self.speak("Speech recognition had a problem, sir (%s). "
+                       "Please type your request instead." % name)
+
+    def _on_stt_timeout(self, dt):
+        if not self.listening:
+            return
+        self.stop_listening()
+        self.speak("I did not hear anything, sir.")
+
+    def _try_plyer_stt(self):
+        """Fallback: the old plyer STT path (kept for devices where
+        the native recognizer is unavailable)."""
         if not HAVE_PLYER or plyer_stt is None:
+            self.listening = False
+            self._release_wake_pause()
+            self._speak_done(0)
             self.speak("Voice input is not available on this device, sir. "
                        "Please type your request instead.")
             return
         try:
             if not plyer_stt.exist():
-                self.speak("Speech recognition is not available on this phone, "
-                           "sir. Please type your request instead.")
+                self.listening = False
+                self._release_wake_pause()
+                self._speak_done(0)
+                self.speak("Speech recognition is not available on this "
+                           "phone, sir. Please type your request instead.")
                 return
         except Exception:
             pass
-        self.listening = True
-        self.set_status("Listening… speak now, sir.")
-        self.reactor.energy = 0.85
-        self.wave.level = 0.8
         try:
             plyer_stt.start()
         except Exception:
             self.listening = False
+            self._release_wake_pause()
             self._speak_done(0)
             self.speak("I could not start the microphone, sir. "
                        "Please check the microphone permission and try again.")
@@ -568,6 +745,7 @@ class JarvisApp(App):
     def stop_listening(self):
         self.listening = False
         self._stt_elapsed = 0
+        self._cancel_stt_timeout()
         if self._stt_timer is not None:
             try:
                 self._stt_timer.cancel()
@@ -575,12 +753,152 @@ class JarvisApp(App):
                 pass
             self._stt_timer = None
         try:
+            if self._stt is not None:
+                self._stt.stop()
+        except Exception:
+            pass
+        try:
             if plyer_stt is not None and getattr(plyer_stt, "listening", False):
                 plyer_stt.stop()
         except Exception:
             pass
+        # Release the always-on listener service (it was paused while
+        # the app listened for the command).
+        self._release_wake_pause()
         self.reactor.energy = 0.35
         self.wave.level = 0.05
+
+    # ------------------------------------------------------------ always-on
+    # listener ("Jarvis" wake word) — v2.1
+
+    def _listener_files(self):
+        """(wake_path, pause_path, error_path) in the app files dir,
+        shared with the listener service. None when not on Android."""
+        if android_phone is None:
+            return (None, None, None)
+        try:
+            d = android_phone.app_files_dir()
+        except Exception:
+            d = None
+        if not d:
+            return (None, None, None)
+        return (os.path.join(d, "wake.txt"),
+                os.path.join(d, "pause.txt"),
+                os.path.join(d, "listener_error.txt"))
+
+    def _check_wake_flag(self, dt):
+        """Polled every second: did the listener service hear
+        'Jarvis'? Also surfaces listener errors (e.g. no mic
+        permission) once, as a chat line, not a repeated popup."""
+        wake_path, pause_path, error_path = self._listener_files()
+        if error_path:
+            try:
+                if os.path.exists(error_path):
+                    with open(error_path, "r", encoding="utf-8") as f:
+                        msg = f.read().strip()
+                    os.remove(error_path)
+                    if msg:
+                        self.add_message("JARVIS", msg)
+            except Exception:
+                pass
+        if not wake_path or self.listening:
+            return
+        try:
+            if not os.path.exists(wake_path):
+                return
+            with open(wake_path, "r", encoding="utf-8") as f:
+                ts = float((f.read().strip() or "0"))
+            os.remove(wake_path)
+        except Exception:
+            return
+        if time.time() - ts > 60:
+            return  # stale wake — ignore
+        # Consume the wake: pause the service, greet, then listen for
+        # the command. (Listening starts after the greeting is spoken,
+        # so the mic does not pick up Jarvis's own voice.)
+        self._pause_listener_service()
+        self.speak("Yes, sir?")
+        secs = max(2.0, len("Yes, sir?") / 14.0)
+        Clock.schedule_once(lambda dt: self._start_listening(), secs)
+
+    def _pause_listener_service(self):
+        """Tell the always-on service to stay off the mic while the
+        app listens (manual tap or after a wake). Released by
+        stop_listening() via _release_wake_pause()."""
+        _, pause_path, _ = self._listener_files()
+        if not pause_path:
+            return
+        try:
+            with open(pause_path, "w", encoding="utf-8") as f:
+                f.write("1")
+            self._wake_pause_path = pause_path
+        except Exception:
+            pass
+
+    def _release_wake_pause(self):
+        if self._wake_pause_path:
+            try:
+                if os.path.exists(self._wake_pause_path):
+                    os.remove(self._wake_pause_path)
+            except Exception:
+                pass
+            self._wake_pause_path = None
+
+    def _listener_service_class(self):
+        """The generated service class, e.g.
+        org.jarvis.jarvis.ServiceJarvislistener. Falls back to the
+        base PythonService class if the generated one is not found."""
+        try:
+            from jnius import autoclass
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            pkg = str(activity.getPackageName())
+            try:
+                return autoclass(pkg + ".ServiceJarvislistener")
+            except Exception:
+                return autoclass("org.kivy.android.PythonService")
+        except Exception:
+            return None
+
+    def _start_listener_service(self):
+        try:
+            service = self._listener_service_class()
+            if service is None:
+                return False
+            from jnius import autoclass
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            service.start(activity, "ic_launcher", "Jarvis is listening",
+                          "Say 'Jarvis' any time.", "")
+            return True
+        except Exception:
+            return False
+
+    def _stop_listener_service(self):
+        try:
+            service = self._listener_service_class()
+            if service is None:
+                return
+            from jnius import autoclass
+            activity = autoclass("org.kivy.android.PythonActivity").mActivity
+            service.stop(activity)
+        except Exception:
+            pass
+
+    def toggle_listener(self, *args):
+        on = not self.config.get("listener_on", True)
+        self.config["listener_on"] = on
+        save_config(self.config)
+        if self.listener_btn is not None:
+            self.listener_btn.text = ("Listener: ON" if on
+                                      else "Listener: OFF")
+        if on:
+            self._start_listener_service()
+            self.speak("Always-on listening is on, sir — just say "
+                       "'Jarvis' any time. Note that it uses more "
+                       "battery while it listens.")
+        else:
+            self._stop_listener_service()
+            self.speak("Always-on listening is off, sir. I will only "
+                       "listen when you tap the microphone.")
 
     # ------------------------------------------------------------ input
 
@@ -711,6 +1029,9 @@ class JarvisApp(App):
 
         # ---- phone powers (android_phone.py; degrade gracefully off-Android)
         if android_phone is not None:
+            if ("open phone" in t or "unlock phone" in t
+                    or "unlock my phone" in t):
+                return android_phone.unlock_phone()
             if t in ("call", "phone"):
                 return "Who should I call, sir?"
             if t in ("text", "message", "send sms", "send a text",
@@ -860,6 +1181,13 @@ class JarvisApp(App):
             if first_run else
             "Gemini API key (stored only on this phone):"
         )
+        # v2.1: show which voice is actually in use, so a wrong (female)
+        # voice can be spotted at a glance.
+        try:
+            if HAVE_ANDROID_TTS and android_tts is not None:
+                body += "\n\n" + android_tts.describe_voice() + "."
+        except Exception:
+            pass
 
         def _save(value):
             if value:

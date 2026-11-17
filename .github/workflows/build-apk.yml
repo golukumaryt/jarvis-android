@@ -50,8 +50,8 @@ jobs:
       - name: Release APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v2.0-${{ github.run_number }}
-          name: Jarvis Android v2.0
+          tag_name: v2.1-${{ github.run_number }}
+          name: Jarvis Android v2.1
           files: bin/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

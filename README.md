@@ -3,7 +3,18 @@
 A voice assistant for your Android phone, Iron-Man style: talk to it, it talks
 back, answers questions with real AI, and runs tasks on your phone.
 
-## ⚠️ Build status — v2.0 rewritten, building in the cloud
+## ⚠️ Build status — v2.1
+
+**v2.1 (Wed 2026-11-18): fixes the three problems the user reported
+on v2.0 — a female voice, a dead microphone, and no always-on
+listening.** The voice picker now scores every UK voice (male names,
+the "male" token, Google's gbb/gbd male variants) and drops the pitch
+when no male voice exists; the app requests all runtime permissions
+at startup and voice input uses Android's SpeechRecognizer directly
+(android_stt.py) with real error reporting; and a foreground service
+(service/main.py) listens for "Jarvis" even with the app closed or
+the phone locked, waking the app with a full-screen notification.
+"Open phone" shows the system's face/PIN unlock screen.
 
 **v2.0 (Tue 2026-11-17): the app was rewritten from scratch.** The v1.1
 cloud builds (GitHub Actions, repo `golukumaryt/jarvis-android`) failed
@@ -26,7 +37,7 @@ downloaded at `~/.buildozer` for a retry if the permission is ever fixed.
 
 ## Install the APK (once you have it)
 
-1. Copy `jarvis-2.0-arm64-v8a-debug.apk` (in the `bin/` folder after a
+1. Copy `jarvis-2.1-arm64-v8a-debug.apk` (in the `bin/` folder after a
    successful build) to your phone.
 2. On the phone, open the file and tap **Install**. If Android blocks it, allow
    **Install unknown apps** for the app you opened it from (Files / Chrome),
@@ -51,8 +62,11 @@ weather, take notes and set timers — but it cannot answer questions.
 
 ## How to talk to Jarvis
 
-- Tap **🎙 TAP TO SPEAK**, wait for "Listening…", then speak. Jarvis replies
-  out loud and in the chat log.
+- Just say **"Jarvis"** any time — even with the app closed or the
+  phone locked. Jarvis wakes up, says "Yes, sir?" and listens.
+  (Uses more battery; turn it off with the **Listener** button.)
+- Or tap **🎙 TAP TO SPEAK**, wait for "Listening…", then speak.
+  Jarvis replies out loud and in the chat log.
 - Or type in the box and tap **Send**.
 - Tap **Commands** to see everything Jarvis understands.
 
@@ -77,6 +91,11 @@ weather, take notes and set timers — but it cannot answer questions.
 - **Open any app** — "Open WhatsApp", "Open Maps" (by name).
 - **Morning briefing** — "Good morning" (time, weather, today's notes,
   running timers, in one spoken summary).
+- **Always-on "Jarvis"** — say "Jarvis" any time and the app wakes up,
+  even from the lock screen (Listener button toggles it off).
+- **Open phone** — "Open phone" shows the face / PIN unlock screen.
+  No app can unlock a phone by itself; you scan your face or enter
+  your PIN and the phone opens.
 - **Chat** — greetings, thanks, and any other question go to the AI brain.
 
 ## Permissions Jarvis asks for — and why
@@ -86,11 +105,13 @@ falls back gracefully when one is off:
 
 | Permission | Why Jarvis wants it | If you deny it |
 |---|---|---|
-| Microphone | Voice input | Type instead of speaking |
+| Microphone | Voice input + always-on "Jarvis" listening | Type instead of speaking |
 | Contacts | Look up who to call / text by name | Calls and texts by name won't work |
 | Phone | Dial a contact directly | Opens the dialler with the number ready |
 | SMS | Send a text directly | Opens the messaging app pre-filled |
 | Camera | Flashlight (the torch is a camera feature) | Flashlight won't work |
+| Notifications | The "Jarvis" wake notification (Android 13+) | The app won't wake from the lock screen |
+| Foreground service | Keeps the always-on listener running | "Jarvis" only works while the app is open |
 
 Jarvis never reads your contacts, messages or call history for any other
 reason, and nothing leaves the phone except the question you ask Gemini
@@ -99,13 +120,16 @@ and the weather lookup.
 ## The voice
 
 Jarvis speaks in a calm British male voice (English UK) — movie-style, chosen
-in the app. Two honest notes:
+in the app. **Settings shows the exact voice in use** (e.g. "Voice:
+en-gb-x-gbb-network (male)"), so a wrong voice can be spotted at a
+glance. Two honest notes:
 
 - It is a phone text-to-speech voice, **not the actor's real voice** from the
   films. That voice is not available anywhere.
-- If it ever sounds American, check the phone's own text-to-speech setting:
-  **Settings → System → Text-to-speech output → Preferred engine → Language →
-  English (United Kingdom)**, and pick a male voice if your engine offers one.
+- If it still sounds female, the phone has no male UK voice installed:
+  **Settings → System → Text-to-speech output → Preferred engine →
+  Google Text-to-Speech → Install voice data → English (United Kingdom)**
+  and download a male voice. Jarvis picks it up automatically.
 
 Voice recognition uses your phone's Google speech recognition, so it needs
 internet (or a downloaded offline language pack) and the Google app on the
@@ -114,6 +138,13 @@ phone.
 ## Honest limits
 
 - **Needs internet** for voice recognition and for Gemini answers.
+- **Cannot unlock the phone by itself** — "Open phone" shows the
+  system's face/PIN screen; only the user's own face or PIN opens it.
+- **Always-on listening uses more battery** — the microphone and the
+  recognizer run continuously. Turn it off with the Listener button
+  when you don't need it.
+- **After a reboot**, the always-on listener starts again the next time
+  the app is opened (there is no boot auto-start).
 - **Cannot control other apps from the inside** — it can open YouTube, Google
   and any installed app, but it cannot, for example, press buttons inside
   another app or change system settings beyond what Android allows.
@@ -143,7 +174,7 @@ python3 -m venv ~/.venvs/jarvis-android
 # Build (first run downloads the Android SDK + NDK, ~10 GB, and takes a while)
 cd jarvis-android
 ~/.venvs/jarvis-android/bin/buildozer android debug
-# APK: bin/jarvis-2.0-arm64-v8a-debug.apk
+# APK: bin/jarvis-2.1-arm64-v8a-debug.apk
 ```
 
 For a release APK you can install without the debug warning, use
@@ -181,9 +212,19 @@ build-environment helper only — the app itself does not need it.)
 
 - `main.py` — the whole app (Kivy UI, voice, commands, Gemini brain).
   v2.0: rewritten 2026-11-17, networking on stdlib urllib only.
+  v2.1: runtime permission requests, android_stt voice input,
+  always-on listener wake handling, "open phone" command.
 - `android_tts.py` — British-voice speech output via Android's own TTS.
+  v2.1: scores every UK voice for maleness (names, "male" token,
+  Google gbb/gbd variants) with a pitch-0.8 fallback.
+- `android_stt.py` — speech recognition via Android's SpeechRecognizer
+  (pyjnius), with result/error callbacks. v2.1, replaces plyer STT.
+- `service/main.py` — the always-on "Jarvis" listener (foreground
+  service): loops SpeechRecognizer, wakes the app on "Jarvis" with a
+  full-screen-intent notification. v2.1.
 - `android_phone.py` — phone powers: calls, texts, alarms, flashlight,
   battery, opening any app (pyjnius; degrades gracefully off-Android).
+  v2.1: permission helpers, lock-screen / unlock-phone support.
 - `buildozer.spec` — Android build settings (API 33, arm64). v2.0:
   requirements `python3,kivy,plyer,android,pyjnius` — no requests.
   Points at `p4a.local_recipes = ./p4a-recipes`.
