@@ -13,7 +13,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip openjdk-17-jdk unzip zip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo5 cmake libffi-dev libssl-dev libsqlite3-dev libbz2-dev libltdl-dev
+          sudo apt-get install -y python3-pip openjdk-17-jdk unzip zip autoconf libtool pkg-config zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6
       - name: Install Buildozer
         run: |
           pip install --upgrade pip
@@ -44,8 +44,8 @@ jobs:
       - name: Release APK
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1-${{ github.run_number }}
-          name: Jarvis Android v1.1
+          tag_name: v2.0-${{ github.run_number }}
+          name: Jarvis Android v2.0
           files: bin/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
