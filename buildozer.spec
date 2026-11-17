@@ -1,4 +1,4 @@
-# Buildozer spec — J.A.R.V.I.S. Android app
+# Buildozer spec - J.A.R.V.I.S. Android app
 # Build with:  buildozer android debug
 # The APK lands in:  bin/jarvis-1.1-arm64-v8a-debug.apk
 
@@ -9,7 +9,11 @@ package.domain = org.jarvis
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas
 version = 1.1
-requirements = python3,kivy,plyer,requests,android,pyjnius,certifi
+# charset-normalizer pinned to the last pure-Python release (3.3.2).
+# Newer releases ship a compiled cp314 wheel for the Android target
+# that pip rejects (is not a supported wheel on this platform),
+# which broke the build via the requests dependency.
+requirements = python3,kivy,plyer,requests,android,pyjnius,certifi,charset-normalizer==3.3.2
 orientation = portrait
 fullscreen = 0
 # INTERNET: Gemini brain + weather. RECORD_AUDIO + MODIFY_AUDIO_SETTINGS:
